@@ -60,6 +60,20 @@
     window.addEventListener("online", () => flash("已联网（本应用仍只使用本机数据）", "ok"));
     window.addEventListener("offline", () => flash("当前离线，校准台可正常使用", "ok"));
     if (!navigator.onLine) flash("离线模式：所有数据仅保存在本机", "ok");
+
+    // 其他标签页写入共享存档时，实时同步已发布版本（storage 事件不会发给写入页自身）
+    window.addEventListener("storage", ev => {
+      if (ev.key !== STORE_KEY || !ev.newValue) return;
+      try {
+        const data = JSON.parse(ev.newValue);
+        if (Array.isArray(data.versions)) {
+          const added = data.versions.length - engine.versions.length;
+          engine.versions = data.versions;
+          renderAll();
+          if (added > 0) flash("检测到另一页面发布了新版本（当前共 " + data.versions.length + " 个，版本已同步）", "ok");
+        }
+      } catch (e) { /* 忽略其他来源的坏数据 */ }
+    });
   }
 
   function mutate(fn) {
@@ -142,10 +156,9 @@
       badge.className = "badge ok";
       const sufficient = engine.devices.length >= 2 && engine.anchors.length >= 1;
       text.textContent = sufficient ? "校准通过 · 可发布" : "校准通过 · 数据不足，暂不能发布";
-      const max = engine.report.maxAgreement;
       if (engine.devices.length >= 2) {
         pill.hidden = false;
-        $("#agreementValue").textContent = max.toFixed(2) + " 秒（限 1 秒）";
+        $("#agreementValue").textContent = engine.report.maxAgreement.toFixed(3).replace(/0$/, "") + " 秒（限 1 秒）";
       } else pill.hidden = true;
       $("#publishBtn").disabled = !sufficient;
     } else {
@@ -445,17 +458,118 @@
     };
   }
 
+  // ———————————————————— 跨标签页发布协调 ————————————————————
+  // 多个共享同一 localStorage 的页面可能同时打开。用 Web Locks 取全局锁，
+  // 锁内重新读取共享存档并按“内容签名 + 时间覆盖”去重，保证同一草稿并发发布
+  // 只有一个页面成功；另一页得到明确拒绝且不产生新版本。
+  const PUBLISH_LOCK = "clock-calib-publish-v1";
+
+  function readStore() {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch (e) { return null; }
+  }
+  function writeStore(data) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(data));
+  }
+
+  /** 从共享存档同步已发布版本到当前内存引擎（只动版本，不覆盖用户正在编辑的草稿） */
+  function syncVersionsFromStore() {
+    const stored = readStore();
+    if (stored && Array.isArray(stored.versions)) engine.versions = stored.versions;
+  }
+
+  function acquireLock(name, fn) {
+    if (typeof navigator !== "undefined" && navigator.locks && navigator.locks.request) {
+      return navigator.locks.request(name, fn);
+    }
+    // 兜底（极旧浏览器 / file:// 锁不可用）：串行执行
+    return Promise.resolve().then(fn);
+  }
+
+  /**
+   * 跨页面互斥发布。
+   * @returns {Promise<{ok:boolean, code?:string, message?:string, version?:object,
+   *                    versionsBefore:number, versionsAfter:number}>}
+   */
+  function publishCrossTab(label) {
+    const before = engine.versions.length;
+    if (!engine.ready) {
+      return Promise.resolve({
+        ok: false, code: "NOT_CALIBRATED",
+        message: "草稿尚未通过重校，不能发布",
+        versionsBefore: before, versionsAfter: engine.versions.length
+      });
+    }
+    if (engine.devices.length < 2 || engine.anchors.length < 1) {
+      return Promise.resolve({
+        ok: false, code: "NO_ANCHORS",
+        message: "至少需要两台设备与一对锚点才能发布校准版本",
+        versionsBefore: before, versionsAfter: engine.versions.length
+      });
+    }
+
+    return acquireLock(PUBLISH_LOCK, async () => {
+      // 锁内重读共享存档：另一页面可能刚刚发布
+      const stored = readStore();
+      const storedVersions = (stored && Array.isArray(stored.versions)) ? stored.versions : [];
+      const mine = engine.serializeData();
+
+      // 同内容已发布（按签名）→ 明确拒绝（可能来自本页的并发点击或另一页面）
+      const dup = storedVersions.find(v => v.signature === engine.signature);
+      if (dup) {
+        engine.versions = storedVersions;
+        return {
+          ok: false, code: "ALREADY_PUBLISHED",
+          message: "同一草稿此前已发布为 " + dup.id + "（可能由另一页面或并发点击发布）；本次拒绝，不产生重复版本",
+          existing: dup, versionsBefore: before, versionsAfter: storedVersions.length
+        };
+      }
+
+      const version = engine.buildVersion(storedVersions.length, label);
+      const nextVersions = storedVersions.concat([version]);
+      // 原子写入：版本与当前草稿一并持久化（草稿以本页为准，失败回滚由下面校验保证）
+      const data = {
+        schema: 1,
+        devices: mine.devices,
+        anchors: mine.anchors,
+        versions: nextVersions
+      };
+      writeStore(data);
+
+      // 发布后立即回读验证：共享存档中版本必须恰好多 1，且末条就是本次版本
+      const verify = readStore();
+      if (!verify || !Array.isArray(verify.versions) ||
+          verify.versions.length !== nextVersions.length ||
+          verify.versions[verify.versions.length - 1].id !== version.id) {
+        // 回滚：恢复写入前的共享版本
+        writeStore({ schema: 1, devices: mine.devices, anchors: mine.anchors, versions: storedVersions });
+        return {
+          ok: false, code: "PUBLISH_CONFLICT",
+          message: "发布写入冲突，已回滚，已发布版本保持不变",
+          versionsBefore: before, versionsAfter: storedVersions.length
+        };
+      }
+
+      engine.versions = nextVersions;
+      return {
+        ok: true, version,
+        versionsBefore: before, versionsAfter: nextVersions.length
+      };
+    });
+  }
+
   async function publish() {
     const before = engine.versions.length;
-    const res = await engine.publish("版本 " + (engine.versions.length + 1));
+    const res = await publishCrossTab("版本 " + (engine.versions.length + 1));
     if (res.ok) {
       save();
       renderAll();
-      flash("发布成功：" + res.version.id, "ok");
+      flash("发布成功：" + res.version.id + "（版本数 " + res.versionsBefore + " → " + res.versionsAfter + "）", "ok");
     } else {
-      // 失败回滚：已发布版本数量必须不变
+      // 失败回滚：同步共享版本并重新渲染；版本数不得增加
+      syncVersionsFromStore();
       const unchanged = engine.versions.length === before;
-      flash("发布被拒绝（" + res.code + "）：" + res.message + "；已发布版本" + (unchanged ? "保持不变" : "异常！"), "err");
+      flash("发布被拒绝（" + res.code + "）：" + res.message +
+        "；已发布版本" + (unchanged ? "保持不变（" + before + " 个）" : "已与其他页面同步"), "err");
       renderAll();
     }
     return res;

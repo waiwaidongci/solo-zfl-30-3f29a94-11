@@ -22,8 +22,13 @@
   const AGREEMENT_LIMIT = 1;    // 多路径结果允许偏差（秒）
   const MAX_PATHS = 8;          // 每设备对最多枚举的独立路径
   const MAX_PATH_LEN = 6;       // 路径最多经过的边数
-  const CHECK_STEP = 30;        // 路径一致性采样步长（秒）
   const EPS = 1e-9;
+
+  /** 秒偏差展示：保留到毫秒，去掉尾随零（至少两位小数） */
+  function fmtSpread(v) {
+    const s = v.toFixed(3);
+    return s.replace(/0$/, "").replace(/(\.\d\d)0$/, "$1");
+  }
 
   const KIND_NAMES = { camera: "相机", divewatch: "潜水表", sonar: "声呐", other: "其他" };
 
@@ -236,6 +241,29 @@
         return v;
       }
 
+      /**
+       * 精确收集“源设备坐标系”下所有分段折点。
+       * 每条路径的映射是分段线性函数；路径之间的差值同样分段线性，
+       * 其极值只可能出现在折点（某条边入侧锚点时刻的源坐标映像）或区间端点。
+       * 固定步长采样会漏掉落在采样网格之间的内部锚点峰值。
+       */
+      function pathBreakpoints(path) {
+        const out = [];
+        const steps = path.edges;
+        for (let k = 0; k < steps.length; k++) {
+          const { edge, dir } = steps[k];
+          for (const pt of edge.pts) {
+            try {
+              // 锚点在第 k 条边入侧的坐标，沿前驱边逐段反映射回源坐标系
+              let v = dir === 1 ? pt.x : pt.y;
+              for (let r = k - 1; r >= 0; r--) v = mapAcross(steps[r].edge, v, -steps[r].dir);
+              if (Number.isFinite(v)) out.push(v);
+            } catch (e) { /* 落在某条边域外的折点跳过 */ }
+          }
+        }
+        return out;
+      }
+
       function edgeDomain(edge, dir) {
         const pts = edge.pts;
         const lo = dir === 1 ? pts[0].x : pts[0].y;
@@ -286,11 +314,23 @@
         let worst = 0;
         let worstPoint = null;
         let worstValues = null;
-        if (Number.isFinite(lo) && Number.isFinite(hi) && usable.length >= 2 && hi - lo > EPS) {
-          for (let t = lo; t <= hi + EPS; t += CHECK_STEP) {
-            const vals = usable.map(p => applyPath(p, Math.min(t, hi)));
+        if (Number.isFinite(lo) && Number.isFinite(hi) && hi - lo > EPS) {
+          // 折点并集 + 共同区间端点：精确覆盖分段线性偏差的所有潜在极值
+          const candidates = [lo, hi];
+          if (usable.length >= 2) {
+            for (const p of usable)
+              for (const bp of pathBreakpoints(p))
+                if (bp >= lo - EPS && bp <= hi + EPS) candidates.push(Math.min(Math.max(bp, lo), hi));
+          }
+          candidates.sort((a, b) => a - b);
+          const seen = new Set();
+          for (const t0 of candidates) {
+            const key = t0.toFixed(6);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const vals = usable.map(p => applyPath(p, t0));
             const spread = Math.max(...vals) - Math.min(...vals);
-            if (spread > worst) { worst = spread; worstPoint = Math.min(t, hi); worstValues = vals; }
+            if (spread > worst) { worst = spread; worstPoint = t0; worstValues = vals; }
           }
         }
         pairReports[key] = {
@@ -312,7 +352,8 @@
           errors.push({
             code: "PATH_CONFLICT",
             message: "「" + devices[i].name + "」→「" + devices[j].name + "」在 " +
-              TimeUtil.format(worstPoint) + " 处多路径结果相差 " + worst.toFixed(2) + " 秒（上限 " + AGREEMENT_LIMIT + " 秒），锚点矛盾",
+              TimeUtil.format(worstPoint) + " 处多路径结果相差 " + fmtSpread(worst) +
+              " 秒（上限 " + AGREEMENT_LIMIT + " 秒），锚点矛盾",
             sources: [...anchorIds],
             pair: [devices[i].id, devices[j].id],
             at: worstPoint,
@@ -420,6 +461,19 @@
 
     get ready() { return !this.dirty && this.report && this.report.ok; }
 
+    /** 构造一条不可变版本快照（不写入 versions，供跨页面发布协调器在锁内调用） */
+    buildVersion(existingCount, label) {
+      return {
+        id: "v" + (existingCount + 1) + "-" + this.signature.slice(4, 10),
+        label: label || ("版本 " + (existingCount + 1)),
+        signature: this.signature,
+        createdAt: new Date().toISOString(),
+        devices: JSON.parse(JSON.stringify(this.devices)),
+        anchors: JSON.parse(JSON.stringify(this.anchors)),
+        maxAgreement: this.report.maxAgreement
+      };
+    }
+
     // —— 发布（同一草稿并发只成功一次）。异步：进入即占锁，让出事件循环后落盘 ——
     async publish(label) {
       if (this._publishing) {
@@ -523,13 +577,17 @@
     }
 
     // —— 持久化 ——
-    serialize() {
-      return JSON.stringify({
+    serializeData() {
+      return {
         schema: 1,
         devices: this.devices,
         anchors: this.anchors,
         versions: this.versions
-      });
+      };
+    }
+
+    serialize() {
+      return JSON.stringify(this.serializeData());
     }
 
     static load(json) {

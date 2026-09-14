@@ -35,8 +35,9 @@ test.describe("同一版本并发发布只成功一次", () => {
       for (let i = 0; i < 5; i++) btn.click();
     });
     await expect(page.locator('[data-testid="version-item"]')).toHaveCount(1);
-    // 首个成功提示
-    await expect(page.locator("#flash")).toContainText(/发布成功|并发/i);
+    // 给出明确反馈：成功或并发拒绝（最后停留的提示可能被拒绝信息覆盖）
+    const flashText = (await page.locator("#flash").textContent()) || "";
+    expect(flashText).toMatch(/发布成功|拒绝/);
 
     // 首版落定后再次发布：内容签名相同 → ALREADY_PUBLISHED，不产生 v2
     await page.click('[data-testid="publish"]');
