@@ -1,0 +1,16 @@
+{
+  "name": "clock-calibration-bench",
+  "version": "1.0.0",
+  "description": "水下考古多设备时钟校准台：相机/潜水表/声呐本地时间的离线分段线性校准与版本发布",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "serve": "node tests/server.js"
+  },
+  "keywords": ["clock-sync", "underwater-archaeology", "offline", "piecewise-linear"],
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}
