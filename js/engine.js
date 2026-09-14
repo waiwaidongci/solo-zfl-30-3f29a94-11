@@ -135,8 +135,19 @@
       if (an.a === an.b) {
         errors.push({ code: "ORDER_ANCHORS", message: "锚点的两台设备不能相同", sources: [an.id], anchorId: an.id });
       }
-      if (TimeUtil.parse(an.ta) === null || TimeUtil.parse(an.tb) === null) {
-        errors.push({ code: "ORDER_ANCHORS", message: "锚点时间格式无效（应为 HH:MM:SS）", sources: [an.id], anchorId: an.id });
+      const va = TimeUtil.validate(an.ta);
+      const vb = TimeUtil.validate(an.tb);
+      if (!va.ok || !vb.ok) {
+        const bad = !va.ok ? va : vb;
+        const which = !va.ok ? "A" : "B";
+        errors.push({
+          code: bad.code,
+          message: "锚点「" + an.ta + " / " + an.tb + "」中设备 " + which +
+            " 的时间不合法：" + bad.reason,
+          sources: [an.id],
+          anchorId: an.id,
+          field: which
+        });
       }
     }
 
@@ -148,6 +159,7 @@
     }
     for (const an of anchors) {
       if (!devIndex.has(an.a) || !devIndex.has(an.b) || an.a === an.b) continue;
+      if (!TimeUtil.validate(an.ta).ok || !TimeUtil.validate(an.tb).ok) continue;
       edgeMap.get(pairKey(an.a, an.b)).anchors.push(an);
     }
 
@@ -474,8 +486,11 @@
         if (!ctx.ok) throw Object.assign(new Error("已发布版本内部数据异常"), { code: "NOT_CALIBRATED", errors: ctx.errors });
         devices = version.devices;
       }
-      const value = TimeUtil.parse(rawTime);
-      if (value === null) throw Object.assign(new Error("时间格式无效，应为 HH:MM:SS"), { code: "BAD_TIME" });
+      const vr = TimeUtil.validate(rawTime);
+      if (!vr.ok) {
+        throw Object.assign(new Error("换算时间不合法：" + vr.reason), { code: "BAD_TIME", reason: vr.reason, subcode: vr.code });
+      }
+      const value = vr.seconds;
       const src = devices.find(d => d.id === srcId);
       const dst = devices.find(d => d.id === dstId);
       if (!src || !dst) throw Object.assign(new Error("未知设备"), { code: "UNKNOWN_DEVICE" });

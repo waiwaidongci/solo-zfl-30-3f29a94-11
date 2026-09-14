@@ -68,7 +68,8 @@
             </div>
             <div>
               <label>A 本地时间</label>
-              <input name="ta" placeholder="HH:MM:SS" required data-testid="anchor-ta">
+              <input name="ta" placeholder="HH:MM:SS" inputmode="numeric" required data-testid="anchor-ta">
+              <div class="field-error" data-err-for="ta" data-testid="anchor-ta-error" hidden></div>
             </div>
             <div>
               <label>设备 B</label>
@@ -76,7 +77,8 @@
             </div>
             <div>
               <label>B 本地时间</label>
-              <input name="tb" placeholder="HH:MM:SS" required data-testid="anchor-tb">
+              <input name="tb" placeholder="HH:MM:SS" inputmode="numeric" required data-testid="anchor-tb">
+              <div class="field-error" data-err-for="tb" data-testid="anchor-tb-error" hidden></div>
             </div>
             <button type="submit" data-testid="anchor-save">添加</button>
             <button type="button" class="secondary" id="anchorCancel" hidden>取消</button>
@@ -88,7 +90,7 @@
         </table>
         <div class="legend">
           <span>红色底纹 = 被冲突/错误点名的锚点</span>
-          <span>时间格式 HH:MM:SS，可带毫秒 .fff</span>
+          <span>时间格式严格为 HH:MM:SS，毫秒可选且必须三位（.fff）；缺秒、越界、混合写法均拒绝</span>
         </div>
       </section>
     </div>
@@ -116,7 +118,7 @@
         <div class="row" style="margin-top:4px">
           <div>
             <label>源设备本地时间</label>
-            <input id="convertTime" placeholder="HH:MM:SS" value="10:30:00" data-testid="convert-time">
+            <input id="convertTime" placeholder="HH:MM:SS" inputmode="numeric" value="10:30:00" data-testid="convert-time">
           </div>
           <div>
             <label>使用版本</label>

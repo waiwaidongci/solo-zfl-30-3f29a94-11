@@ -100,8 +100,8 @@ test.describe("增删改锚点后结果立即失效，重校恢复", () => {
       e.addAnchor(c, w, "10:00:00", "09:59:40");
       e.addAnchor(c, w, "11:00:00", "10:59:40");
       // 直连边隐含 +30s，这里做成 +30.6s（亚秒级分歧，经相机路径为 +30s）
-      e.addAnchor(w, s, "09:59:40", "10:00:10.6");
-      e.addAnchor(w, s, "10:59:40", "11:00:10.6");
+      e.addAnchor(w, s, "09:59:40", "10:00:10.600");
+      e.addAnchor(w, s, "10:59:40", "11:00:10.600");
       window.__calib.load(e.serialize());
     });
     await clickRecalibrate(page);

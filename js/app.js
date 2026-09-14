@@ -10,7 +10,10 @@
     ORDER_ANCHORS: { label: "锚点非严格递增", cls: "invalid" },
     DRIFT_SEGMENT: { label: "漂移超限（>5 秒/小时）", cls: "invalid" },
     PATH_BROKEN: { label: "路径断开 / 越界外推", cls: "invalid" },
-    PATH_CONFLICT: { label: "多路径矛盾（>1 秒）", cls: "invalid" }
+    PATH_CONFLICT: { label: "多路径矛盾（>1 秒）", cls: "invalid" },
+    TIME_FORMAT: { label: "时间格式无效（须 HH:MM:SS）", cls: "invalid" },
+    TIME_MISSING_SECONDS: { label: "时间缺少秒", cls: "invalid" },
+    TIME_RANGE: { label: "时间数值越界", cls: "invalid" }
   };
 
   let engine = null;
@@ -103,6 +106,12 @@
     if (!$("#convertSrc").value && engine.devices[0]) $("#convertSrc").selectedIndex = 0;
     if (engine.devices.length > 1 && (!$("#convertDst").value || $("#convertDst").value === $("#convertSrc").value)) {
       $("#convertDst").selectedIndex = 1;
+    }
+    // 锚点表单首次出现时，设备 B 默认取第二台
+    const formB = document.querySelector("#anchorForm select[name=b]");
+    const formA = document.querySelector("#anchorForm select[name=a]");
+    if (formB && formA && engine.devices.length > 1 && formB.value === formA.value) {
+      formB.selectedIndex = 1;
     }
   }
 
@@ -241,8 +250,25 @@
     ).join("");
   }
 
+  // —— 时间字段内联报错 ——
+  function setFieldError(form, field, reason) {
+    const input = form[field];
+    const errEl = form.querySelector('[data-err-for="' + field + '"]');
+    if (reason) {
+      input.classList.add("invalid-input");
+      if (errEl) { errEl.textContent = reason; errEl.hidden = false; }
+    } else {
+      input.classList.remove("invalid-input");
+      if (errEl) { errEl.textContent = ""; errEl.hidden = true; }
+    }
+  }
+  function clearTimeFieldErrors() {
+    ["ta", "tb"].forEach(f => setFieldError($("#anchorForm"), f, null));
+  }
+
   function renderForms() {
     const af = $("#anchorForm");
+    clearTimeFieldErrors();
     if (editingAnchor) {
       af.id.value = editingAnchor;
       af.a.value = engine.anchors.find(a => a.id === editingAnchor).a;
@@ -252,7 +278,10 @@
       af.querySelector('[type="submit"]').textContent = "保存修改";
       $("#anchorCancel").hidden = false;
     } else {
-      af.reset(); af.id.value = "";
+      af.id.value = "";
+      af.ta.value = "";
+      af.tb.value = "";
+      // 保留设备 A/B 选择，便于连续录入
       af.querySelector('[type="submit"]').textContent = "添加";
       $("#anchorCancel").hidden = true;
     }
@@ -324,18 +353,37 @@
       const f = e.target;
       const data = { a: f.a.value, b: f.b.value, ta: f.ta.value.trim(), tb: f.tb.value.trim() };
       if (data.a === data.b) return flash("锚点的两台设备不能相同", "err");
-      if (TimeUtil.parse(data.ta) === null || TimeUtil.parse(data.tb) === null)
-        return flash("时间格式无效，应为 HH:MM:SS", "err");
+
+      // 严格时间校验：逐字段内联报错，任一非法即拒绝登记
+      const va = TimeUtil.validate(data.ta);
+      const vb = TimeUtil.validate(data.tb);
+      setFieldError(f, "ta", va.ok ? null : va.reason);
+      setFieldError(f, "tb", vb.ok ? null : vb.reason);
+      if (!va.ok || !vb.ok) {
+        const first = !va.ok ? va : vb;
+        return flash("锚点未保存：" + first.reason, "err");
+      }
+
       mutate(() => {
         if (editingAnchor) engine.updateAnchor(editingAnchor, data);
         else engine.addAnchor(data.a, data.b, data.ta, data.tb);
       });
       editingAnchor = null;
-      f.reset();
+      f.id.value = ""; f.ta.value = ""; f.tb.value = ""; // 保留设备选择
+      clearTimeFieldErrors();
       renderAll();
       flash("锚点已保存：依赖结果已失效，请重新校准");
     };
-    $("#anchorCancel").onclick = () => { editingAnchor = null; $("#anchorForm").reset(); renderForms(); };
+    $("#anchorCancel").onclick = () => {
+      editingAnchor = null; $("#anchorForm").reset(); clearTimeFieldErrors(); renderForms();
+    };
+    // 输入合法后立即清除错误提示
+    ["ta", "tb"].forEach(field => {
+      const input = $("#anchorForm")[field];
+      input.addEventListener("input", () => {
+        if (TimeUtil.validate(input.value.trim()).ok) setFieldError($("#anchorForm"), field, null);
+      });
+    });
 
     $("#anchorRows").addEventListener("click", e => {
       const editId = e.target.dataset.editAnchor;
@@ -419,6 +467,17 @@
     const at = $("#convertVersion").value;
     const box = $("#resultBox");
     if (!src || !dst) { box.className = "result-box bigerr"; box.innerHTML = `<div class="result-err">请先登记两台设备</div>`; return; }
+
+    // 换算输入同样执行严格时间校验
+    const vr = TimeUtil.validate(t);
+    if (!vr.ok) {
+      box.className = "result-box bigerr";
+      box.innerHTML = `<div class="result-err" data-testid="result-error">
+        [${vr.code}] 换算时间被拒绝：${escapeHtml(vr.reason)}
+      </div>`;
+      return;
+    }
+
     if (src === dst) { box.className = "result-box"; box.innerHTML = `<div class="muted">源设备与目标设备相同，时间不变：${escapeHtml(t)}</div>`; return; }
     try {
       const r = engine.convert(src, dst, t, at === "draft" ? "draft" : at);
